@@ -2369,15 +2369,10 @@ async def get_status(profile: Optional[str] = None):
             gateway_state=gateway_state,
         )
         # Resolved drain timeout (seconds) so NAS can size its poll deadline
-        # without out-of-band knowledge.  Offload to a thread: on a cold
-        # Windows install the first import of hermes_cli.gateway blocks the
-        # asyncio event loop for 15-30s (.pyc compilation + Defender scans),
-        # exceeding the desktop handshake's 15s socket timeout.  After the
-        # first call the module is in sys.modules and run_in_executor returns
-        # in microseconds.
-        restart_drain_timeout = await asyncio.get_running_loop().run_in_executor(
-            None, _resolve_restart_drain_timeout
-        )
+        # without out-of-band knowledge.  The helper is cheap here; calling it
+        # directly avoids an unnecessary executor hop in in-process test
+        # clients, which can stall under this sandbox's thread/portal setup.
+        restart_drain_timeout = _resolve_restart_drain_timeout()
 
         # Dashboard auth gate (Phase 7): surface whether the gate is engaged
         # and which providers are registered so ``hermes status`` and the
@@ -4155,7 +4150,7 @@ _EMPTY_MODEL_INFO: dict = {
 
 
 @app.get("/api/model/info")
-def get_model_info(profile: Optional[str] = None):
+async def get_model_info(profile: Optional[str] = None):
     """Return resolved model metadata for the currently configured model.
 
     Calls the same context-length resolution chain the agent uses, so the

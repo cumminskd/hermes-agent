@@ -14,14 +14,52 @@ without any external IDP.  Exercises:
 """
 from __future__ import annotations
 
-import pytest
+import asyncio
 
-from fastapi.testclient import TestClient
+import httpx
+import pytest
 
 from hermes_cli import web_server
 from hermes_cli.dashboard_auth import clear_providers, register_provider
 from hermes_cli.dashboard_auth.cookies import SESSION_AT_COOKIE
 from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
+
+
+class _AsyncClientFacade:
+    """Small sync wrapper around httpx.AsyncClient for this test module.
+
+    Starlette's TestClient hangs in this sandbox even for a trivial FastAPI
+    app, so these tests use ASGITransport directly and keep cookie state in a
+    shared jar across requests.
+    """
+
+    def __init__(self, app, *, base_url: str):
+        self._app = app
+        self._base_url = base_url
+        self.cookies = httpx.Cookies()
+
+    def request(self, method: str, url: str, **kwargs):
+        return asyncio.run(self._request(method, url, **kwargs))
+
+    def get(self, url: str, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+    def delete(self, url: str, **kwargs):
+        return self.request("DELETE", url, **kwargs)
+
+    async def _request(self, method: str, url: str, **kwargs):
+        transport = httpx.ASGITransport(app=self._app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=self._base_url,
+            cookies=self.cookies,
+        ) as client:
+            response = await client.request(method, url, **kwargs)
+        self.cookies.update(response.cookies)
+        return response
 
 
 @pytest.fixture
@@ -37,7 +75,10 @@ def gated_app():
     web_server.app.state.auth_required = True
     # Use https base_url so cookies pick up Secure flag and host_header
     # matches the bound interface.
-    client = TestClient(web_server.app, base_url="https://fly-app.fly.dev")
+    client = _AsyncClientFacade(
+        web_server.app,
+        base_url="https://fly-app.fly.dev",
+    )
     yield client
     clear_providers()
     web_server.app.state.bound_host = prev_host
@@ -165,7 +206,7 @@ def test_full_login_round_trip_unlocks_gated_api(gated_app):
     state = redirect.split("state=")[1]
 
     # 2) The browser would now follow the redirect to /auth/callback.
-    #    TestClient automatically carries the PKCE cookie forward.
+    #    The facade keeps the PKCE cookie in its shared jar.
     r2 = gated_app.get(
         f"/auth/callback?code=stub_code&state={state}",
         follow_redirects=False,
@@ -175,6 +216,7 @@ def test_full_login_round_trip_unlocks_gated_api(gated_app):
     set_cookies = r2.headers.get_list("set-cookie")
     assert any("hermes_session_at" in c for c in set_cookies)
     assert any("hermes_session_rt" in c for c in set_cookies)
+    assert any(SESSION_AT_COOKIE in c.name for c in gated_app.cookies.jar)
 
     # 3) A gated API route (``/api/sessions``) now succeeds because we
     #    have a valid session cookie. (We deliberately don't probe
@@ -191,7 +233,7 @@ def test_full_login_round_trip_unlocks_gated_api(gated_app):
 def _complete_stub_login(client) -> None:
     """Walk the stub OAuth round trip so ``client`` carries a valid session.
 
-    TestClient persists Set-Cookie across calls, so after this returns the
+    The facade persists Set-Cookie across calls, so after this returns the
     client's cookie jar holds ``hermes_session_at`` / ``hermes_session_rt``
     and subsequent gated requests authenticate.
     """
@@ -439,7 +481,10 @@ def test_gated_zero_providers_fails_closed_on_api_auth_providers():
     web_server.app.state.bound_host = "fly-app.fly.dev"
     web_server.app.state.auth_required = True
     try:
-        client = TestClient(web_server.app, base_url="https://fly-app.fly.dev")
+        client = _AsyncClientFacade(
+            web_server.app,
+            base_url="https://fly-app.fly.dev",
+        )
         r = client.get("/api/auth/providers")
         assert r.status_code == 503
         assert "no auth providers" in r.text.lower()
@@ -455,7 +500,10 @@ def test_gated_zero_providers_login_page_renders_help_text():
     web_server.app.state.bound_host = "fly-app.fly.dev"
     web_server.app.state.auth_required = True
     try:
-        client = TestClient(web_server.app, base_url="https://fly-app.fly.dev")
+        client = _AsyncClientFacade(
+            web_server.app,
+            base_url="https://fly-app.fly.dev",
+        )
         r = client.get("/login")
         assert r.status_code == 200
         # Empty-provider HTML mentions the fix-up path.  (HTML wraps text
@@ -536,8 +584,11 @@ def _gated_state():
     web_server.app.state.bound_port = 443
     web_server.app.state.auth_required = True
 
-    def _client() -> TestClient:
-        return TestClient(web_server.app, base_url="https://fly-app.fly.dev")
+    def _client() -> _AsyncClientFacade:
+        return _AsyncClientFacade(
+            web_server.app,
+            base_url="https://fly-app.fly.dev",
+        )
 
     yield _client
     clear_providers()
