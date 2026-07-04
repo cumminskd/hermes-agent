@@ -216,6 +216,7 @@ def test_full_login_round_trip_unlocks_gated_api(gated_app):
     set_cookies = r2.headers.get_list("set-cookie")
     assert any("hermes_session_at" in c for c in set_cookies)
     assert any("hermes_session_rt" in c for c in set_cookies)
+    assert any(SESSION_AT_COOKIE in c.name for c in gated_app.cookies.jar)
 
     # 3) A gated API route (``/api/sessions``) now succeeds because we
     #    have a valid session cookie. (We deliberately don't probe
