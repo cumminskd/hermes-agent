@@ -136,6 +136,26 @@ def test_default_spawn_model_override_survives_real_cli_parse(monkeypatch, tmp_p
     assert args.query == "work kanban task t_spawn_tools"
 
 
+def test_worker_argv_expands_registered_skill_bundle(monkeypatch):
+    """Kanban task skill fields may name a Hermes bundle, not a preload skill."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["hermes"])
+    monkeypatch.setattr(
+        "agent.skill_bundles.get_skill_bundles",
+        lambda: {"/polaris-tech-lead": {"slug": "polaris-tech-lead", "skills": ["codebase-inspection", "systematic-debugging"]}},
+    )
+    task = _make_task(kb, assignee="elias")
+    task.skills = ["polaris-tech-lead"]
+
+    cmd = kbd._worker_argv(task, "elias", None)
+
+    assert cmd[cmd.index("--skills") + 1:cmd.index("chat")] == [
+        "codebase-inspection", "--skills", "systematic-debugging",
+    ]
+
+
 def test_default_spawn_resolves_env_passthrough_under_multiplex(monkeypatch, tmp_path):
     """Under multiplex a worker spawn with ``terminal.env_passthrough`` configured must
     forward the ASSIGNEE profile's own value, never crash on an unscoped read or leak the

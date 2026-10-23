@@ -2740,6 +2740,47 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
         _kb._log.debug("kanban worker: legacy session retag skipped (%s)", exc)
 
 
+def _worker_skill_names(skill_names: Iterable[str]) -> list[str]:
+    """Resolve task skill fields to CLI-preloadable skills.
+
+    Kanban cards historically stored both individual skill names and Hermes
+    skill-bundle names in the same ``skills`` field.  ``--skills`` accepts only
+    individual skills; bundles are slash-command aliases backed by
+    ``<HERMES_HOME>/skill-bundles``.  Expand registered bundles at the worker
+    boundary so existing cards keep their intended capability set without
+    duplicating bundle definitions as fake skills.
+    """
+    try:
+        from agent.skill_bundles import get_skill_bundles
+
+        bundles = get_skill_bundles()
+    except Exception:
+        # Skill expansion must never make ordinary task dispatch unavailable;
+        # the worker will retain Hermes' normal missing-skill diagnostics.
+        bundles = {}
+    by_slug = {
+        str(info.get("slug") or "").strip().lower(): info
+        for info in bundles.values()
+        if isinstance(info, dict) and str(info.get("slug") or "").strip()
+    }
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for raw in skill_names or ():
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        slug = name.lstrip("/").strip().lower().replace("_", "-")
+        info = by_slug.get(slug)
+        members = info.get("skills") if info else None
+        values = members if isinstance(members, list) and members else [name]
+        for value in values:
+            member = str(value or "").strip()
+            if member and member not in seen:
+                seen.add(member)
+                resolved.append(member)
+    return resolved
+
+
 def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
     """Build the ``hermes -p <profile> --cli ... chat -q ...`` worker command."""
     cmd = [
@@ -2755,7 +2796,7 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
     ]
     # One `--skills X` pair per name: easier to read in `ps` and avoids quoting
     # ambiguity if a skill name contains unusual chars.
-    for sk in task.skills or ():
+    for sk in _worker_skill_names(task.skills or ()):
         if sk:
             cmd.extend(["--skills", sk])
     if task.model_override:
