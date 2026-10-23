@@ -25,6 +25,38 @@ from hermes_cli import kanban_db as kb
 
 BLACKBOARD_PREFIX = "[swarm:blackboard] "
 
+# Explicit, conservative substitutions for specialist lanes that are commonly
+# requested by workflow templates but are not installed in every Hermes fleet.
+# This is deliberately a small allow-list: an unknown profile must fail at
+# swarm creation instead of becoming an invisible ready-queue stall.
+PROFILE_FALLBACKS = {
+    "security-engineer": "tech-lead",
+    "ux-researcher": "ux-ui",
+}
+
+
+def resolve_spawnable_profile(name: str) -> str:
+    """Return an installed profile or an approved equivalent.
+
+    Swarm creation is the right boundary for this check.  Previously an
+    unavailable profile was accepted and left the child in ``ready`` forever,
+    while the parent was reported as a completed topology.  Callers that use
+    the low-level graph builder can keep legacy test fixtures by opting out;
+    the CLI path enables validation.
+    """
+    from hermes_cli.profiles import profile_exists
+
+    canonical = _require_text(name, "profile")
+    if profile_exists(canonical):
+        return canonical
+    fallback = PROFILE_FALLBACKS.get(canonical)
+    if fallback and profile_exists(fallback):
+        return fallback
+    raise ValueError(
+        f"profile '{canonical}' is not installed and has no approved fallback; "
+        "install the profile or choose an available assignee before creating the swarm"
+    )
+
 
 @dataclass(frozen=True)
 class SwarmWorkerSpec:
@@ -119,9 +151,22 @@ def create_swarm(
     workspace_path: Optional[str] = None,
     priority: int = 0,
     idempotency_key: Optional[str] = None,
+    validate_profiles: bool = False,
 ) -> SwarmCreated:
     """Atomically create a durable, immediately dispatchable Kanban swarm."""
-    activation_summary = "Swarm topology planned; root remains the shared blackboard."
+    if validate_profiles:
+        workers = [
+            SwarmWorkerSpec(
+                profile=resolve_spawnable_profile(spec.profile), title=spec.title,
+                body=spec.body, skills=spec.skills, priority=spec.priority,
+                max_runtime_seconds=spec.max_runtime_seconds,
+            )
+            for spec in workers
+        ]
+        verifier_assignee = resolve_spawnable_profile(verifier_assignee)
+        synthesizer_assignee = resolve_spawnable_profile(synthesizer_assignee)
+
+    activation_summary = "Swarm topology opened; completion remains gated by verifier and synthesizer."
     activated = False
     with kb.write_txn(conn):
         created = _create_swarm_uncommitted(
