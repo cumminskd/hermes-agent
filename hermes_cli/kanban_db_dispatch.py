@@ -845,19 +845,20 @@ def detect_stale_running(
 def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
     """Requeue ``running`` cards with broken claim bookkeeping; returns their ids.
 
-    A task ``running`` with NULL ``claim_lock``/``claim_expires`` (crash
-    mid-claim, manual SQL, DB restore) is a zombie forever: ``release_stale_claims``
-    needs ``claim_expires``, ``detect_crashed_workers`` needs a host-local lock +
-    pid, ``detect_stale_running`` is off by default. Orphans go back to ``ready``
+    A task ``running`` with NULL ``claim_lock``/``claim_expires`` or without an
+    active run (crash mid-claim, interrupted terminal handoff, manual SQL, DB
+    restore) is a zombie forever: ``release_stale_claims`` needs
+    ``claim_expires``, ``detect_crashed_workers`` needs a host-local lock + pid,
+    and ``detect_stale_running`` is off by default. Orphans go back to ``ready``
     with a comment, leaked run closed, ``reconciled`` event; a row with a live
     host-local PID is deferred so no duplicate spawns beside it.
     """
     now = int(time.time())
     reconciled: list[str] = []
     rows = conn.execute(
-        "SELECT id, claim_lock, claim_expires, worker_pid, worker_started_at FROM tasks "
+        "SELECT id, claim_lock, claim_expires, current_run_id, worker_pid, worker_started_at FROM tasks "
         "WHERE status = 'running' "
-        "  AND (claim_lock IS NULL OR claim_expires IS NULL)"
+        "  AND (claim_lock IS NULL OR claim_expires IS NULL OR current_run_id IS NULL)"
     ).fetchall()
     for row in rows:
         tid = row["id"]
@@ -875,8 +876,9 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
                 "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
-                "  AND claim_lock IS ? AND claim_expires IS ?",
-                (tid, row["claim_lock"], row["claim_expires"]),
+                "  AND claim_lock IS ? AND claim_expires IS ? "
+                "  AND current_run_id IS ?",
+                (tid, row["claim_lock"], row["claim_expires"], row["current_run_id"]),
             )
             if cur.rowcount != 1:
                 continue
@@ -884,6 +886,7 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
                 "reason": "orphaned_running",
                 "claim_lock": row["claim_lock"],
                 "claim_expires": _kb._opt_int(row["claim_expires"]),
+                "current_run_id": _kb._opt_int(row["current_run_id"]),
                 "worker_pid": int(pid) if pid else None,
                 "now": now,
             }

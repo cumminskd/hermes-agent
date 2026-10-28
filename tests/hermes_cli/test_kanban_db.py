@@ -41,6 +41,28 @@ def _init_git_repo(repo: Path) -> None:
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True, text=True)
 
 
+def test_reconcile_orphaned_running_repairs_closed_run_without_terminal_task_state(kanban_home):
+    """A run can be closed before its task transition commits; do not leave the
+    task permanently running when the claim fields still look populated."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="interrupted handoff", assignee="coder")
+        claimed = kb.claim_task(conn, tid, claimer=kb._claimer_id())
+        assert claimed is not None
+        conn.execute("UPDATE tasks SET current_run_id = NULL WHERE id = ?", (tid,))
+        conn.commit()
+
+        assert kbd.reconcile_orphaned_running(conn) == [tid]
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "ready"
+        assert task.current_run_id is None
+        assert task.claim_lock is None
+        event = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 1", (tid,)
+        ).fetchone()
+        assert event["kind"] == "reconciled"
+
+
 # ---------------------------------------------------------------------------
 # Schema / init
 # ---------------------------------------------------------------------------
