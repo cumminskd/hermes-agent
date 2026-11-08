@@ -96,6 +96,25 @@ def test_dispatch_spawn_fires_worker_spawned(
     assert "board" in kw
     assert pid_at_fire_time == [4242]
 
+
+def test_rejected_pid_registration_does_not_report_spawn(
+    kanban_home, all_assignees_spawnable, captured_hooks, monkeypatch,
+):
+    """A stale PID registration cannot fire the hook or enter the result."""
+    monkeypatch.setattr(kbd, "_set_worker_pid", lambda *args, **kwargs: False)
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="stale spawn", assignee="alice")
+        result = kbd.dispatch_once(conn, spawn_fn=lambda *a, **k: 4343)
+        assert not any(row[0] == tid for row in result.spawned)
+        assert conn.execute(
+            "SELECT worker_pid FROM tasks WHERE id = ?", (tid,)
+        ).fetchone()[0] is None
+    finally:
+        conn.close()
+
+    assert not [e for e in captured_hooks if e[0] == "on_kanban_worker_spawned"]
+
 def test_crash_reclaim_fires_worker_exited(kanban_home, captured_hooks, monkeypatch):
     """A dead-PID reclaim fires the exit observer with the exit facts."""
     conn = kbc.connect()

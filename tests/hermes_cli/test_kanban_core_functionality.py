@@ -80,6 +80,40 @@ def kanban_home(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_spawn_pid_registration_is_bound_to_the_claimed_run(kanban_home):
+    conn = kbc.connect()
+    tid = kb.create_task(conn, title="run-bound pid", assignee="worker")
+    try:
+        first = kb.claim_task(conn, tid)
+        assert first is not None
+        first_run = first.current_run_id
+        assert kbd._set_worker_pid(conn, tid, 111, expected_run_id=first_run)
+
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_runs SET ended_at = ? WHERE id = ?",
+                (int(time.time()), first_run),
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', worker_pid = NULL, worker_started_at = NULL, "
+                "claim_lock = NULL, claim_expires = NULL, current_run_id = NULL "
+                "WHERE id = ?",
+                (tid,),
+            )
+        second = kb.claim_task(conn, tid)
+        assert second is not None and second.current_run_id != first_run
+
+        # A late return from the first spawn must not write into run two.
+        assert not kbd._set_worker_pid(conn, tid, 222, expected_run_id=first_run)
+        assert conn.execute("SELECT worker_pid FROM tasks WHERE id = ?", (tid,)).fetchone()[0] is None
+
+        # The current spawn remains valid and is accepted.
+        assert kbd._set_worker_pid(conn, tid, 333, expected_run_id=second.current_run_id)
+        assert conn.execute("SELECT worker_pid FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == 333
+    finally:
+        conn.close()
+
+
 
 
 

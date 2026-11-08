@@ -1468,21 +1468,37 @@ def _record_task_failure(
         return True
 
 
-def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
+def _set_worker_pid(
+    conn: sqlite3.Connection, task_id: str, pid: int, *, expected_run_id: Optional[int] = None,
+) -> bool:
     """Record the spawned child's pid + its restart-stable fingerprint (``_process_fingerprint``), and
     emit a ``spawned`` event carrying them. The fingerprint is what lets every later liveness/kill
-    decision tell OUR worker from a process that recycled the PID after a reboot. A failed capture is
-    persisted as ``UNVERIFIED_WORKER_FINGERPRINT``, never NULL: NULL is the legacy pre-fingerprint row
+    decision tell OUR worker from a process that recycled the PID. A dispatcher
+    call must provide ``expected_run_id``; the unbound form remains only for
+    legacy test/library callers and does not provide stale-run protection.
+    A failed capture is persisted as ``UNVERIFIED_WORKER_FINGERPRINT``, never NULL: NULL is the legacy pre-fingerprint row
     whose bare-PID kill authority a new spawn must not inherit."""
     started_at = _process_fingerprint(int(pid)) or UNVERIFIED_WORKER_FINGERPRINT
     with _kb.write_txn(conn):
-        conn.execute("UPDATE tasks SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
-                     (int(pid), started_at, task_id))
-        run_id = _kb._current_run_id(conn, task_id)
+        if expected_run_id is None:
+            task_update = conn.execute(
+                "UPDATE tasks SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
+                (int(pid), started_at, task_id),
+            )
+        else:
+            task_update = conn.execute(
+                "UPDATE tasks SET worker_pid = ?, worker_started_at = ? "
+                "WHERE id = ? AND status = 'running' AND current_run_id = ? AND worker_pid IS NULL",
+                (int(pid), started_at, task_id, int(expected_run_id)),
+            )
+        if task_update.rowcount != 1:
+            return False
+        run_id = expected_run_id if expected_run_id is not None else _kb._current_run_id(conn, task_id)
         if run_id is not None:
             conn.execute("UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
-                         (int(pid), started_at, run_id))
+                         (int(pid), started_at, int(run_id)))
         _kb._append_event(conn, task_id, "spawned", {"pid": int(pid), "started_at": started_at}, run_id=run_id)
+    return True
 
 
 def adopt_worker_pid(conn: sqlite3.Connection, task_id: str, run_id: int, pid: int) -> bool:
@@ -2125,8 +2141,19 @@ def _dispatch_lane_task(
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
     try:
         pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
+        pid_registered = True
         if pid:
-            _set_worker_pid(conn, claimed.id, int(pid))
+            # The spawn call can return after a stale worker was reclaimed and
+            # the task was claimed again.  Bind the PID write to the run that
+            # produced it; never let a late result overwrite the new run.
+            pid_registered = _set_worker_pid(
+                conn, claimed.id, int(pid), expected_run_id=claimed.current_run_id,
+            )
+        if not pid_registered:
+            # The process belongs to a run that is no longer current.  Do not
+            # attribute it to this dispatch tick through either observer or
+            # result bookkeeping.
+            return False
         # Fires AFTER the PID (when reported) is durably persisted. Best-effort.
         _kb._fire_worker_spawned_hook(conn, claimed, str(workspace), pid, board=board)
         # consecutive_failures is deliberately NOT reset here: resetting on
