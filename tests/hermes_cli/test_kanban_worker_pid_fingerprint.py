@@ -110,6 +110,17 @@ def test_same_pid_and_start_tick_on_another_boot_is_foreign(board, monkeypatch):
     assert kbd._process_fingerprint(os.getpid()) == live_fingerprint
 
 
+def test_same_worker_fingerprint_tolerates_small_start_time_drift(board, monkeypatch):
+    """macOS can shift same-process start-time readings by about one second."""
+    from gateway import drain_control, status
+
+    epoch = drain_control.current_instantiation_epoch()
+    recorded = f"{epoch}|178864182760"
+    monkeypatch.setattr(status, "get_process_start_time", lambda _pid: 178864182860)
+
+    assert kbd._worker_alive(os.getpid(), recorded) is True
+
+
 def test_unverified_fingerprint_capture_never_authorizes_a_signal(board, monkeypatch):
     """Fingerprint capture fails for a new spawn: the row is NOT a legacy NULL row. A live PID under
     it is never SIGTERM/SIGKILLed by any reclaim/timeout path, and the claim is held (not released

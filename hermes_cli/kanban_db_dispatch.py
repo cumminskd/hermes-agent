@@ -403,7 +403,18 @@ def _pid_recycled(pid: Optional[int], started_at) -> bool:
     if started_at == UNVERIFIED_WORKER_FINGERPRINT:
         return True
     if isinstance(started_at, str) and "|" in started_at:
-        return _process_fingerprint(int(pid)) != started_at
+        current = _process_fingerprint(int(pid))
+        if current is None:
+            return True
+        try:
+            recorded_epoch, recorded_start = started_at.rsplit("|", 1)
+            current_epoch, current_start = current.rsplit("|", 1)
+        except ValueError:
+            return True
+        if recorded_epoch != current_epoch:
+            return True
+        from gateway.status import start_time_fingerprints_match
+        return not start_time_fingerprints_match(recorded_start, current_start)
     from gateway.status import _start_times_agree, get_process_start_time
     current = get_process_start_time(int(pid))
     if current is None:
