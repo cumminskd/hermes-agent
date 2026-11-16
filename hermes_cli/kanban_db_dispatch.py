@@ -2549,7 +2549,10 @@ def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
     then owns dependency activation as usual. A resolved shim path owns its
     imports and is left alone. Same pin cron's external worker uses (#112729).
     """
-    if cmd[1:3] != ["-m", "hermes_cli.main"]:
+    module_args = cmd[1:]
+    if module_args[:1] == ["-P"]:
+        module_args = module_args[1:]
+    if module_args[:2] != ["-m", "hermes_cli.main"]:
         return
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
 
@@ -2823,9 +2826,17 @@ def _worker_skill_names(skill_names: Iterable[str]) -> list[str]:
 
 
 def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
-    """Build the ``hermes -p <profile> --cli ... chat -q ...`` worker command."""
+    """Build the ``hermes -p <profile> --cli ... chat -q ...`` worker command.
+
+    The module-form command runs with the task workspace as its current
+    directory.  ``-P`` prevents a Hermes worktree at that location from
+    shadowing the pinned install selected by ``PYTHONPATH`` (#143583).
+    """
+    resolved = _resolve_hermes_argv()
+    if resolved[1:3] == ["-m", "hermes_cli.main"]:
+        resolved = [resolved[0], "-P", *resolved[1:]]
     cmd = [
-        *_resolve_hermes_argv(),
+        *resolved,
         "-p", profile_arg,
         # A worker must NEVER boot the interactive TUI: its no-TTY bail-out
         # exits 0 without doing the task → "protocol violation" every attempt.

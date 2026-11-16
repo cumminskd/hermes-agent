@@ -1693,6 +1693,33 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
     assert root not in captured["env"].get("PYTHONPATH", "").split(os.pathsep)
 
 
+def test_worker_argv_uses_safe_path_for_module_worker(monkeypatch):
+    """A Hermes worktree workspace must not shadow the pinned worker install."""
+    import sys
+
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    task = kb.Task(
+        id="t_safe_path", title="x", body=None, assignee="coder", status="ready",
+        priority=0, created_by=None, created_at=0, started_at=None, completed_at=None,
+        workspace_kind="worktree", workspace_path=None, claim_lock=None,
+        claim_expires=None, tenant=None, branch_name=None,
+    )
+    monkeypatch.setattr(
+        kbd,
+        "_resolve_hermes_argv",
+        lambda: [sys.executable, "-m", "hermes_cli.main"],
+    )
+
+    assert kbd._worker_argv(task, "coder", None)[:4] == [
+        sys.executable,
+        "-P",
+        "-m",
+        "hermes_cli.main",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # task_age — guard against corrupt timestamp values
 #
