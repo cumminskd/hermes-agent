@@ -168,6 +168,7 @@ def test_unverified_fingerprint_capture_never_authorizes_a_signal(board, monkeyp
     assert killed == [] and kb.get_task(conn, tid2).status == "ready"
 
 
+@pytest.mark.platforms("macos")
 @pytest.mark.parametrize("probe", [
     subprocess.CompletedProcess([], 1, stdout=""),
     subprocess.CompletedProcess([], 0, stdout=""),
@@ -175,15 +176,14 @@ def test_unverified_fingerprint_capture_never_authorizes_a_signal(board, monkeyp
 ])
 def test_failed_macos_secondary_probe_keeps_positive_existence(monkeypatch, probe):
     from gateway import status
-    monkeypatch.setattr(kbd.sys, "platform", "darwin")
     monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
     monkeypatch.setattr(kbd.subprocess, "run", lambda *a, **kw: probe)
     assert kbd._pid_alive(12345) is True
 
 
+@pytest.mark.platforms("macos")
 def test_confirmed_zombie_is_dead(monkeypatch):
     from gateway import status
-    monkeypatch.setattr(kbd.sys, "platform", "darwin")
     monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
     monkeypatch.setattr(kbd.subprocess, "run", lambda *a, **kw:
                         subprocess.CompletedProcess([], 0, stdout="Z"))
