@@ -225,6 +225,7 @@ def test_unreadable_schema_without_cli_names_the_sqlite3_requirement(
     import hermes_cli.session_lost_and_found as laf
 
     monkeypatch.setattr(laf, "find_sqlite3_cli", lambda: None)
+    monkeypatch.setattr(laf, "find_sqlite3_cli_refusal", lambda: {"reason": "missing"})
     with pytest.raises(SessionRecoverySourceError) as excinfo:
         recover_session_database(
             source,
@@ -236,6 +237,27 @@ def test_unreadable_schema_without_cli_names_the_sqlite3_requirement(
     assert "sessions" in message and "messages" in message
     assert "sqlite3" in message
     assert ".recover" in message
+    assert not output.exists()
+
+
+def test_unreadable_schema_with_vulnerable_cli_keeps_the_safety_refusal(tmp_path, monkeypatch):
+    import hermes_cli.session_lost_and_found as laf
+
+    source = tmp_path / "schemaless.db"
+    output = tmp_path / "schemaless-recovered.db"
+    _make_schema_unreadable_source(source)
+    monkeypatch.setattr(laf, "find_sqlite3_cli", lambda: None)
+    monkeypatch.setattr(laf, "find_sqlite3_cli_refusal", lambda: {
+        "reason": "wal_reset_vulnerable", "detail": "WAL-reset-vulnerable SQLite build",
+    })
+
+    with pytest.raises(SessionRecoverySourceError) as excinfo:
+        recover_session_database(source, output, work_dir=tmp_path, allow_partial=True)
+
+    message = str(excinfo.value)
+    assert "not safe to use" in message and "WAL-reset" in message
+    assert "sessions" in message and "messages" in message
+    assert ".recover" not in message
     assert not output.exists()
 
 
