@@ -63,6 +63,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Native Mac bundles remain required; the fork does not support Windows.
+        exclude: ${{ fromJSON(github.repository == 'cumminskd/hermes-agent' && '[{"target":{"label":"win32-x64","runner":"windows-latest-32-core"}},{"target":{"label":"win32-arm64","runner":"windows-latest-32-arm-core"}}]' || '[]') }}
         target:
           # TODO(ethie): restore the linux legs once the ubuntu-latest-32-*
           # larger runners are re-imaged to Ubuntu 24.04. They currently boot

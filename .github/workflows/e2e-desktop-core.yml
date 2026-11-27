@@ -23,6 +23,8 @@ concurrency:
 
 jobs:
   core:
+    # Linux packaging is advisory on the Mac-focused fork only.
+    continue-on-error: ${{ github.repository == 'cumminskd/hermes-agent' }}
     name: Desktop core E2E (Linux)
     runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && 'ubuntu-latest' || 'ubuntu-latest-32-core' }}
     timeout-minutes: ${{ github.repository == 'cumminskd/hermes-agent' && 120 || 30 }}

@@ -25,6 +25,8 @@ concurrency:
 
 jobs:
   update:
+    # Linux install/update is advisory on the Mac-focused fork only.
+    continue-on-error: ${{ github.repository == 'cumminskd/hermes-agent' }}
     name: Desktop install/update E2E (Linux, ${{ matrix.cell }})
     runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && 'ubuntu-latest' || 'ubuntu-latest-32-core' }}
     timeout-minutes: ${{ github.repository == 'cumminskd/hermes-agent' && 120 || 30 }}
