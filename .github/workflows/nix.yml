@@ -75,8 +75,9 @@ jobs:
     # The build compiles the package and its whole dependency closure, so this
     # takes minutes and not seconds when the cache misses. `nix flake check`
     # builds 21 checks, and --max-jobs defaults to the core count. It uses the
-    # wider runner with no more configuration.
-    runs-on: ubuntu-latest-32-core
+    # wider runner with no more configuration. The fork uses a standard hosted
+    # runner; upstream retains its wider runner.
+    runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && 'ubuntu-latest' || 'ubuntu-latest-32-core' }}
     timeout-minutes: 60
     steps:
       - name: Checkout code
