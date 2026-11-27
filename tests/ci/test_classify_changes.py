@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.ci import _gha_expr as gha
+
 _PATH = Path(__file__).resolve().parents[2] / "scripts" / "ci" / "classify_changes.py"
 _spec = importlib.util.spec_from_file_location("classify_changes", _PATH)
 if _spec is None or _spec.loader is None:
@@ -584,12 +586,11 @@ _REAL_UPDATE_LANES = (
 
 
 @pytest.mark.parametrize("caller,job,called,lane", _REAL_UPDATE_LANES)
-def test_real_update_suites_gate_the_merge_when_their_lane_fires(caller, job, called, lane):
-    """A real-update suite that runs but cannot fail the merge is decoration.
-
-    Each one must reach ``all-checks-pass`` (directly, or through the
-    reusable workflow that calls it), be gated on its lane, and never be
-    ``continue-on-error``: a red shard has to block the PR it ran for.
+@pytest.mark.parametrize("repository", ["NousResearch/hermes-agent", "cumminskd/hermes-agent", "other/hermes-agent"])
+def test_real_update_suites_gate_the_merge_when_their_lane_fires(caller, job, called, lane, repository):
+    """Upstream suites gate merges; only the Mac-focused fork's integration
+    and Windows jobs are advisory. Native Mac and platform-independent gates
+    remain required. Evaluate expressions, not their nonempty YAML strings.
     """
     ci = _yaml(".github/workflows/ci.yaml")
     caller_jobs = _yaml(f".github/workflows/{caller}")["jobs"]
@@ -599,7 +600,26 @@ def test_real_update_suites_gate_the_merge_when_their_lane_fires(caller, job, ca
     root = job if caller == "ci.yaml" else "tests-os"
     assert root in ci["jobs"]["all-checks-pass"]["needs"]
     for name, body in _yaml(f".github/workflows/{called}")["jobs"].items():
-        assert not body.get("continue-on-error"), f"{called}::{name} cannot fail the merge"
+        rows = body.get("strategy", {}).get("matrix", {}).get("include", [{}])
+        for matrix in rows:
+            ctx = {"github": {"repository": repository}, "matrix": matrix}
+            advisory = gha.truthy(gha.render(body.get("continue-on-error", False), ctx))
+            expected = repository == "cumminskd/hermes-agent" and (
+                called in {"tests.yml", "e2e-desktop-update.yml", "remote-backends.yml"}
+                or (called == "tests-os.yml" and name == "os-tests" and matrix.get("marker") == "windows")
+            )
+            assert advisory == expected, f"{repository}: {called}::{name} {matrix} advisory={advisory}"
+
+    for required in ("js-tests", "rust-tests", "lint", "all-checks-pass"):
+        assert required in ci["jobs"]
+        if required != "all-checks-pass":
+            assert required in ci["jobs"]["all-checks-pass"]["needs"]
+        bodies = [ci["jobs"][required]]
+        if uses := bodies[0].get("uses"):
+            bodies.extend(_yaml(uses.removeprefix("./"))["jobs"].values())
+        for body in bodies:
+            ctx = {"github": {"repository": repository}}
+            assert not gha.truthy(gha.render(body.get("continue-on-error", False), ctx)), required
 
 
 def test_remote_backends_lane_runs_test_files_that_exist_and_start_it():
