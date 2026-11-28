@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   check-attribution:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && (github.event_name == 'pull_request' || github.event_name == 'push') && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
       review_status: ${{ steps.check-emails.outputs.review_status }}
@@ -20,6 +20,12 @@ jobs:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           fetch-depth: 0  # Full history needed for git log
+
+      - name: Provide GNU grep for the daily Mac fork
+        if: github.repository == 'cumminskd/hermes-agent' && runner.os == 'macOS'
+        run: |
+          brew install grep
+          printf '%s\n' "$(brew --prefix grep)/libexec/gnubin" >> "$GITHUB_PATH"
 
       - name: Check for unmapped contributor emails
         id: check-emails

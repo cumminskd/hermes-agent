@@ -38,6 +38,7 @@ concurrency:
 jobs:
   venv-holder-e2e:
     name: venv-holder live E2E (windows-latest)
+    if: github.repository != 'cumminskd/hermes-agent' || inputs.release == true || github.event_name != 'push'
     runs-on: windows-latest-32-core
     timeout-minutes: 25
     steps:

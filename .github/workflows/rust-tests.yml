@@ -30,7 +30,7 @@ jobs:
     # cargo builds codegen units and test binaries in parallel across the
     # cores. This lane also builds the crate from the start when Cargo.toml
     # changes.
-    runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && 'ubuntu-latest' || 'ubuntu-latest-32-core' }}
+    runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && ((github.event_name == 'pull_request' || github.event_name == 'push') && 'macos-latest' || 'ubuntu-latest') || 'ubuntu-latest-32-core' }}
     timeout-minutes: ${{ github.repository == 'cumminskd/hermes-agent' && 120 || 30 }}
     defaults:
       run:
@@ -41,6 +41,7 @@ jobs:
       # Tauri links against the system webkit2gtk on Linux, so the crate does
       # not compile without these even for `cargo test --lib`.
       - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
         working-directory: .
         run: |
           sudo apt-get update

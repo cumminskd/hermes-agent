@@ -65,6 +65,8 @@ jobs:
   # the parent stable-release workflow on the tagged candidate commit.
   mode:
     name: Resolve release phase
+    # Daily fork development is Mac-only; reusable release phases are unchanged.
+    if: github.repository != 'cumminskd/hermes-agent' || inputs.release-phase != '' || (github.event_name != 'pull_request' && github.event_name != 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

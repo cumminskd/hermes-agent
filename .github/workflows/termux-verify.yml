@@ -38,6 +38,7 @@ concurrency:
 jobs:
   contracts:
     name: Termux packaging contracts on Linux
+    if: github.repository != 'cumminskd/hermes-agent' || inputs.release == true || (github.event_name != 'pull_request' && github.event_name != 'push')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -69,7 +70,7 @@ jobs:
 
   tui:
     name: Prebuilt TUI checks
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && inputs.release != true && (github.event_name == 'pull_request' || github.event_name == 'push') && 'macos-latest' || 'ubuntu-24.04' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -98,7 +99,7 @@ jobs:
   # keeps a fork or an unprovisioned main green instead of red.
   r2-provisioned:
     name: Detect R2 credentials
-    if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && (github.repository != 'cumminskd/hermes-agent' || inputs.release == true || github.event_name != 'push')
     runs-on: ubuntu-24.04
     environment: release-signing
     timeout-minutes: 5

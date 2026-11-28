@@ -71,6 +71,8 @@ concurrency:
 
 jobs:
   os-tests:
+    # The daily fork uses the Mac-only job below; upstream/manual coverage is unchanged.
+    if: github.repository != 'cumminskd/hermes-agent' || (github.event_name != 'pull_request' && github.event_name != 'push')
     # Windows is advisory on the Mac-focused fork; both macOS slices stay required.
     continue-on-error: ${{ github.repository == 'cumminskd/hermes-agent' && matrix.marker == 'windows' }}
     name: ${{ matrix.name }}
@@ -82,13 +84,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Two slices on the free standard runner (3 cores, 3 workers): one lane ran
-          # ~7.5 min and became the slowest required job once the Linux suite split.
-          - name: macOS-only tests (1/2)
+          - &macos-slice-1
+            name: macOS-only tests (1/2)
             runner: macos-latest
             marker: macos
             slice: 1/2
-          - name: macOS-only tests (2/2)
+          - &macos-slice-2
+            name: macOS-only tests (2/2)
             runner: macos-latest
             marker: macos
             slice: 2/2
@@ -99,7 +101,7 @@ jobs:
             runner: windows-latest-32-arm-core
             marker: windows
             timeout: 60
-    steps:
+    steps: &native-os-steps
       - name: Checkout code
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
 
@@ -205,6 +207,20 @@ jobs:
         # every earlier step passed: a step that failed midway can leave its own temp files
         # (a half-extracted download, a worktree its later cleanup never removed).
         uses: ./.github/actions/check-clean-worktree
+
+  mac-tests:
+    # Share the exact native test steps, without scheduling Windows rows at all.
+    if: github.repository == 'cumminskd/hermes-agent' && (github.event_name == 'pull_request' || github.event_name == 'push')
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - *macos-slice-1
+          - *macos-slice-2
+    steps: *native-os-steps
 
   install-update-e2e:
     # The real scripts/install.ps1 -> `hermes update` HEAD -> NEXT journey on a real Windows

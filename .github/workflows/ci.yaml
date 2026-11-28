@@ -66,9 +66,11 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   detect:
     name: Detect affected areas
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && inputs.release != true && (github.event_name == 'pull_request' || github.event_name == 'push') && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 1
     outputs:
+      # Daily fork policy only; manual/release runs keep existing coverage.
+      mac_only: ${{ github.repository == 'cumminskd/hermes-agent' && inputs.release != true && (github.event_name == 'pull_request' || github.event_name == 'push') }}
       python: ${{ steps.gate-lanes.outputs.python }}
       python_prod: ${{ steps.gate-lanes.outputs.python_prod }}
       frontend: ${{ steps.gate-lanes.outputs.frontend }}
@@ -135,7 +137,7 @@ jobs:
     needs: detect
     # Its E2E jobs are lanes of their own: a lane the classifier sets must reach
     # its job whatever `python` says (tests/ci/test_update_ci_routing.py).
-    if: needs.detect.outputs.python == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true'
+    if: needs.detect.outputs.mac_only != 'true' && (needs.detect.outputs.python == 'true' || needs.detect.outputs.e2e == 'true' || needs.detect.outputs.e2e_upgrade == 'true')
     uses: ./.github/workflows/tests.yml
     with:
       e2e: ${{ needs.detect.outputs.e2e == 'true' }}
@@ -193,7 +195,7 @@ jobs:
     # runner's Docker daemon. Only PRs that touch the backends / terminal tool /
     # their real tests start it (and every push to main); it runs in parallel with
     # the other lanes and is required whenever detect selects it.
-    if: needs.detect.outputs.remote_backends == 'true'
+    if: needs.detect.outputs.mac_only != 'true' && needs.detect.outputs.remote_backends == 'true'
     uses: ./.github/workflows/remote-backends.yml
 
   bootstrap-installer:
@@ -202,7 +204,7 @@ jobs:
     # The bootstrap-installer path: install.sh, the pin fragments it embeds,
     # and the version stamp it ships. The PowerShell installer's native tests
     # are platforms("windows") pytest files and run in tests-os.
-    if: needs.detect.outputs.bootstrap == 'true'
+    if: needs.detect.outputs.mac_only != 'true' && needs.detect.outputs.bootstrap == 'true'
     uses: ./.github/workflows/bootstrap-installer.yml
 
   e2e-desktop:
@@ -228,7 +230,7 @@ jobs:
     needs: detect
     # The deterministic core suite (apps/desktop/e2e/core): transcript
     # integrity, boot/respawn/orphans, clarify+approval. Required; retries 0.
-    if: needs.detect.outputs.e2e_desktop_core == 'true'
+    if: needs.detect.outputs.mac_only != 'true' && needs.detect.outputs.e2e_desktop_core == 'true'
     uses: ./.github/workflows/e2e-desktop-core.yml
 
   e2e-desktop-update:
@@ -241,7 +243,7 @@ jobs:
     # the Linux e2e-upgrade shards and the Windows install + update journey
     # (tests / tests-os, gated on e2e_upgrade), it is skipped — and the skip
     # counts as success — when the PR does not touch that path.
-    if: needs.detect.outputs.e2e_desktop_update == 'true'
+    if: needs.detect.outputs.mac_only != 'true' && needs.detect.outputs.e2e_desktop_update == 'true'
     uses: ./.github/workflows/e2e-desktop-update.yml
 
   docs-site:
@@ -320,7 +322,7 @@ jobs:
   docker-lint:
     name: Lint Docker scripts
     needs: detect
-    if: needs.detect.outputs.docker_meta == 'true'
+    if: needs.detect.outputs.mac_only != 'true' && needs.detect.outputs.docker_meta == 'true'
     uses: ./.github/workflows/docker-lint.yml
 
   supply-chain:
@@ -395,16 +397,18 @@ jobs:
       # to block a merge. A separate run also stops it from holding this
       # run open. That is what blocked ``gh run rerun``.
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && inputs.release != true && (github.event_name == 'pull_request' || github.event_name == 'push') && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
-      needs-json: ${{ steps.evaluate.outputs.needs-json }}
+      # Keep the branch-protection check name and the real result summary.
+      needs-json: ${{ steps.evaluate.outputs.needs-json || steps.evaluate-mac.outputs.needs-json }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           ref: ${{ github.sha }}
       - name: Evaluate job results
         id: evaluate
+        if: needs.detect.outputs.mac_only != 'true'
         # Shared with the stable orchestrator (scripts/ci/required_results.py
         # is imported there). NEEDS is the toJSON(needs) context; RELEASE
         # switches the gate into strict mode for release runs.
@@ -415,6 +419,34 @@ jobs:
           args=()
           if [ "$RELEASE" = true ]; then args+=(--release); fi
           printf '%s' "$NEEDS" | python3 scripts/ci/required_results.py "${args[@]}"
+
+      - name: Evaluate daily Mac-only fork results
+        id: evaluate-mac
+        if: needs.detect.outputs.mac_only == 'true'
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from scripts.ci.required_results import compact_results, render_report
+
+          needs = json.loads(os.environ['NEEDS'])
+          lanes = needs['detect']['outputs']
+          # Linux-only consumers intentionally skip. Fail every failure/cancellation
+          # and any skipped selected native Mac lane; report actual results unchanged.
+          required = {'detect'}
+          if any(lanes.get(key) == 'true' for key in ('python', 'desktop_updater', 'e2e', 'e2e_upgrade')):
+              required.add('tests-os')
+          failed = [name for name, info in needs.items()
+                    if info['result'] != 'success'
+                    and (name in required or info['result'] != 'skipped')]
+          failed.extend(required - needs.keys())
+          verdict = {'failed': sorted(set(failed))}
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('needs-json=' + json.dumps(compact_results(needs)) + '\n')
+          print('\n'.join(render_report(needs, verdict)))
+          raise SystemExit(bool(failed))
+          PY
 
   # ─────────────────────────────────────────────────────────────────────
   # CI timing report: collect per-job/step durations from the GitHub API,
@@ -430,7 +462,7 @@ jobs:
     name: CI timing report
     needs: [all-checks-pass]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && inputs.release != true && (github.event_name == 'pull_request' || github.event_name == 'push') && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout code
