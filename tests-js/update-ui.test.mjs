@@ -4,7 +4,7 @@ import path from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { JSDOM } from 'jsdom'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 import updateUi from '../tests/install/e2e-assets/update-ui.cjs'
 import sourceBranchProbe from '../tests/install/e2e-assets/source-branch-probe.cjs'
 
@@ -123,20 +123,23 @@ test('test-only source probe pins staged main without changing other Python invo
   expect(sourceBranchProbe.branchProbeArgs(cmd, root, '/real&git')).toBe(cmd)
 })
 
-test.skipIf(process.platform === 'win32')('probe Git reaches the staged main even with global Git config isolated', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-staged-git-'))
-  const git = process.env.HERMES_E2E_REAL_GIT || process.env.PATH.split(path.delimiter)
-    .map(dir => path.join(dir, process.platform === 'win32' ? 'git.exe' : 'git')).find(file => fs.existsSync(file))
-  try {
-    const checkout = path.join(root, 'checkout')
+// Repository provisioning is fixture work; the test still bounds the real
+// application probe, launcher passthrough and mismatched-target rejection.
+describe.skipIf(process.platform === 'win32').each([false, true])('staged Git fixture (foreign=%s)', (foreignCheckout) => {
+  let root, git, checkout, base, sha, launcher, capturedEnv, launchEnv, env, home, other
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-staged-git-'))
+    git = process.env.HERMES_E2E_REAL_GIT || process.env.PATH.split(path.delimiter)
+      .map(dir => path.join(dir, process.platform === 'win32' ? 'git.exe' : 'git')).find(file => fs.existsSync(file))
+    checkout = path.join(root, 'checkout')
     const bare = path.join(root, 'serve.git')
     fs.mkdirSync(checkout)
     const run = (args, cwd = checkout, env = process.env) => execFileSync(git, args, { cwd, env, encoding: 'utf8' }).trim()
     run(['init', '-b', 'main'])
     run(['-c', 'user.name=Fixture', '-c', 'user.email=e2e@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'base'])
-    const base = run(['rev-parse', 'HEAD'])
+    base = run(['rev-parse', 'HEAD'])
     run(['-c', 'user.name=Fixture', '-c', 'user.email=e2e@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'staged'])
-    const sha = run(['rev-parse', 'HEAD'])
+    sha = run(['rev-parse', 'HEAD'])
     run(['clone', '--bare', checkout, bare], root)
     run(['reset', '--hard', base])
     run(['remote', 'add', 'origin', 'https://github.com/NousResearch/hermes-agent.git'])
@@ -144,32 +147,31 @@ test.skipIf(process.platform === 'win32')('probe Git reaches the staged main eve
     run(['config', '--file', cfg, '--add', `url.file://${bare}.insteadOf`, 'https://github.com/NousResearch/hermes-agent.git'])
     const python = process.env.HERMES_PYTHON || 'python3'
     const source = fileURLToPath(new URL('../', import.meta.url))
-    const launcher = path.join(checkout, '.hermes', 'bin', 'hermes')
+    launcher = path.join(checkout, '.hermes', 'bin', 'hermes')
     fs.mkdirSync(path.dirname(launcher), { recursive: true })
     const quote = value => `'${value.replace(/'/g, "'\\''")}'`
     fs.writeFileSync(launcher, `#!/bin/sh\nif [ "$1" = '--run-module' ]; then shift 2; exec ${quote(python)} -m hermes_cli.source_check "$@"; fi\nprintf '%s\\n' "$@"\n`, { mode: 0o700 })
-    const capturedEnv = { ...process.env, GIT_CONFIG_GLOBAL: cfg }
-    const launchEnv = { HERMES_DESKTOP_USER_DATA_DIR: root }
+    capturedEnv = { ...process.env, GIT_CONFIG_GLOBAL: cfg }
+    launchEnv = { HERMES_DESKTOP_USER_DATA_DIR: root }
     sourceBranchProbe.prepareSourceBranchEnvironment(checkout, sha, git, capturedEnv, launchEnv)
-    const env = { ...process.env, GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+    env = { ...process.env, GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
       PYTHONPATH: source, GIT_ALLOW_PROTOCOL: 'file' }
-    const home = path.join(root, 'profile')
+    home = path.join(root, 'profile')
     fs.mkdirSync(home)
+    other = path.join(root, 'other-checkout')
+    if (foreignCheckout) fs.mkdirSync(other)
+  })
+  afterAll(() => { if (root) fs.rmSync(root, { recursive: true, force: true }) })
+  test('probe Git reaches the staged main even with global Git config isolated', () => {
     const status = JSON.parse(execFileSync(launcher, ['--run-module', 'hermes_cli.source_check',
-      '--install-root', checkout, '--home', home, '--git', git, '--force'],
+      '--install-root', foreignCheckout ? other : checkout, '--home', home, '--git', git, '--force'],
     { cwd: checkout, encoding: 'utf8', env }))
-    expect(status).toMatchObject({ supported: true, currentSha: base, branch: 'main', targetSha: sha, updateAvailable: true })
+    expect(status).toMatchObject(foreignCheckout
+      ? { supported: false, reason: 'not-a-git-checkout' }
+      : { supported: true, currentSha: base, branch: 'main', targetSha: sha, updateAvailable: true })
     expect(execFileSync(launcher, ['--version'], { cwd: checkout, env, encoding: 'utf8' }).trim()).toBe('--version')
-    const other = path.join(root, 'other-checkout')
-    fs.mkdirSync(other)
-    const foreign = JSON.parse(execFileSync(launcher, ['--run-module', 'hermes_cli.source_check',
-      '--install-root', other, '--home', home, '--git', git, '--force'],
-    { cwd: checkout, encoding: 'utf8', env }))
-    expect(foreign).toMatchObject({ supported: false, reason: 'not-a-git-checkout' })
     expect(() => sourceBranchProbe.prepareSourceBranchEnvironment(checkout, '0'.repeat(40), git, capturedEnv, launchEnv)).toThrow(/does not match expected/)
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true })
-  }
+  })
 })
 
 test.skipIf(process.platform === 'win32')('historical venv install without a PM launcher still checks staged Git main', () => {

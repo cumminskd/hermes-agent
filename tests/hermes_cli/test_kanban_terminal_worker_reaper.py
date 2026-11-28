@@ -85,7 +85,12 @@ def test_recycled_pid_and_legacy_row_are_never_signalled(conn):
     try:
         _tid, run_id = _completed_card_with_worker(conn, stranger)
         # PID reuse: the recorded fingerprint belongs to a process that no longer exists.
-        conn.execute("UPDATE task_runs SET worker_started_at = worker_started_at - 1000000 WHERE id=?", (run_id,))
+        fingerprint = conn.execute(
+            "SELECT worker_started_at FROM task_runs WHERE id=?", (run_id,)
+        ).fetchone()["worker_started_at"]
+        epoch, start = fingerprint.rsplit("|", 1)
+        conn.execute("UPDATE task_runs SET worker_started_at = ? WHERE id=?",
+                     (f"{epoch}|{int(start) + 1000000}", run_id))
         _, legacy_run = _completed_card_with_worker(conn, legacy)
         conn.execute("UPDATE task_runs SET worker_started_at = NULL WHERE id=?", (legacy_run,))
 

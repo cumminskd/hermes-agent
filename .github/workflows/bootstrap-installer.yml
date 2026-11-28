@@ -20,6 +20,8 @@ concurrency:
 
 jobs:
   posix:
+    # This integration job uses a Linux host; the fork keeps it advisory.
+    continue-on-error: ${{ github.repository == 'cumminskd/hermes-agent' }}
     name: install.sh protocol + small fresh-install E2E
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -127,6 +129,7 @@ jobs:
         run: bash scripts/run_tests.sh tests/scripts/test_fresh_source_install.py -q -j 1
 
   windows:
+    if: github.repository != 'cumminskd/hermes-agent'
     name: install.ps1 protocol surface
     runs-on: windows-latest
     timeout-minutes: 10

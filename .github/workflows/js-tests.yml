@@ -14,8 +14,9 @@ jobs:
     #
     # One larger runner installs one time. vitest, tsc and eslint each size
     # their own worker pool from the core count.
-    runs-on: ubuntu-latest-32-core
-    timeout-minutes: 30
+    # Fork fallback retains every workspace check; upstream keeps its larger runner.
+    runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && ((github.event_name == 'pull_request' || github.event_name == 'push') && 'macos-latest' || 'ubuntu-latest') || 'ubuntu-latest-32-core' }}
+    timeout-minutes: ${{ github.repository == 'cumminskd/hermes-agent' && 120 || 30 }}
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
       - name: Set up the locked JS build toolchain

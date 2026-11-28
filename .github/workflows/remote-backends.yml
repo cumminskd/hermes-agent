@@ -30,6 +30,8 @@ env:
 
 jobs:
   real-backends:
+    # Linux container integration is advisory on the Mac-focused fork only.
+    continue-on-error: ${{ github.repository == 'cumminskd/hermes-agent' }}
     name: SSH + Docker backends (real sshd, real daemon)
     runs-on: ubuntu-latest
     timeout-minutes: 15

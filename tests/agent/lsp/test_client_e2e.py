@@ -187,9 +187,10 @@ async def test_cancelled_start_hard_kills_sigterm_ignoring_descendant(tmp_path: 
             start.cancel()
             await asyncio.gather(start, return_exceptions=True)
         if child is not None:
-            # The descendant can exit between a liveness check and the signal; killing a gone process is fine.
+            # Keep the original Process identity, but do not signal an already retired descendant.
             with contextlib.suppress(psutil.NoSuchProcess):
-                child.kill()
+                if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                    child.kill()
 
 
 @pytest.mark.asyncio

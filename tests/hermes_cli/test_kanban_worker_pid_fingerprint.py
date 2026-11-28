@@ -8,6 +8,10 @@ must require the spawn-time start fingerprint to match, never bare PID existence
 import os
 import signal
 import time
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from pathlib import Path
 
 import pytest
 
@@ -86,6 +90,9 @@ def test_same_pid_and_start_tick_on_another_boot_is_foreign(board, monkeypatch):
     instantiation epoch does not. The worker is foreign: claim released, zero signals."""
     from gateway import drain_control
 
+    # Boot witnesses are Linux-only; simulate one on every test platform.
+    monkeypatch.setattr(drain_control, "current_instantiation_epoch", lambda: "current-boot:1")
+
     conn = board
     killed = []
     live_fingerprint = kbd._process_fingerprint(os.getpid())
@@ -106,7 +113,6 @@ def test_same_pid_and_start_tick_on_another_boot_is_foreign(board, monkeypatch):
 
     # The same value re-derived on THIS boot still identifies our worker (the witness is stable
     # within a boot, unlike the recorded epoch of a previous one).
-    drain_control.current_instantiation_epoch.cache_clear()
     assert kbd._process_fingerprint(os.getpid()) == live_fingerprint
 
 
@@ -160,3 +166,87 @@ def test_unverified_fingerprint_capture_never_authorizes_a_signal(board, monkeyp
     monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
     assert kb.release_stale_claims(conn, signal_fn=sig) == 1
     assert killed == [] and kb.get_task(conn, tid2).status == "ready"
+
+
+@pytest.mark.platforms("macos")
+@pytest.mark.parametrize("probe", [
+    subprocess.CompletedProcess([], 1, stdout=""),
+    subprocess.CompletedProcess([], 0, stdout=""),
+    subprocess.CompletedProcess([], 0, stdout="Ss"),
+])
+def test_failed_macos_secondary_probe_keeps_positive_existence(monkeypatch, probe):
+    from gateway import status
+    monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+    monkeypatch.setattr(kbd.subprocess, "run", lambda *a, **kw: probe)
+    assert kbd._pid_alive(12345) is True
+
+
+@pytest.mark.platforms("macos")
+def test_confirmed_zombie_is_dead(monkeypatch):
+    from gateway import status
+    monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+    monkeypatch.setattr(kbd.subprocess, "run", lambda *a, **kw:
+                        subprocess.CompletedProcess([], 0, stdout="Z"))
+    assert kbd._pid_alive(12345) is False
+
+
+@pytest.mark.parametrize("observed", [None, "|invalid", "|0"])
+def test_unknown_fingerprint_never_reclaims_or_signals(board, monkeypatch, observed):
+    conn = board
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(kbd, "_process_fingerprint", lambda pid: observed)
+    tid = _claimed_running(conn, pid=12345, started_at="|1000", max_runtime=1)
+    signals = []
+    assert kbd._reclaim_dead_workers(conn).crashed == []
+    assert kbd.enforce_max_runtime(conn, signal_fn=lambda *a: signals.append(a)) == []
+    assert kb.release_stale_claims(conn, signal_fn=lambda *a: signals.append(a)) == 0
+    assert kb.get_task(conn, tid).status == "running"
+    assert kb.claim_task(conn, tid, claimer="second-dispatcher") is None
+    assert signals == []
+
+
+def test_confirmed_dead_worker_releases_claim(board, monkeypatch):
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: False)
+    tid = _claimed_running(board, pid=12345, started_at="|1000")
+    sweep = kbd._reclaim_dead_workers(board)
+    assert tid in sweep.crashed
+    assert kb.get_task(board, tid).status == "ready"
+
+
+def test_concurrent_dispatch_claims_cannot_duplicate_uncertain_worker(board, monkeypatch):
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(kbd, "_process_fingerprint", lambda pid: None)
+    tid = _claimed_running(board, pid=12345, started_at="|1000")
+    assert kbd._reclaim_dead_workers(board).crashed == []
+    barrier = Barrier(2)
+    database = Path(board.execute("PRAGMA database_list").fetchone()[2])
+
+    def compete(name):
+        conn = kbc.connect(database)
+        try:
+            barrier.wait(timeout=5)
+            assert kbd._reclaim_dead_workers(conn).crashed == []
+            assert kb.release_stale_claims(conn) == 0
+            return kb.claim_task(conn, tid, claimer=name)
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a = pool.submit(compete, "dispatcher-a")
+        b = pool.submit(compete, "dispatcher-b")
+        assert a.result(timeout=10) is None
+        assert b.result(timeout=10) is None
+    assert kb.get_task(board, tid).status == "running"
+
+
+@pytest.mark.parametrize("recorded,current,expected", [
+    (123456, 123456, True),  # historical Linux start ticks
+    (179552123053, 179552123053, True),  # historical macOS centiseconds
+    ("179552123053", 179552123153, True),  # same-host clock drift
+    (123456, 124456, False),  # affirmative reuse
+    ("broken", 123456, None),
+])
+def test_legacy_fingerprint_scales(monkeypatch, recorded, current, expected):
+    from gateway import status
+    monkeypatch.setattr(status, "get_process_start_time", lambda pid: current)
+    assert kbd._worker_identity_matches(12345, recorded) is expected

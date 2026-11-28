@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   structural:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && github.event_name == 'pull_request' && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
@@ -44,9 +44,16 @@ jobs:
           python3 scripts/validate_plugin_catalog.py plugin-catalog/
 
   pinned-source-validate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'cumminskd/hermes-agent' && github.event_name == 'pull_request' && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
+      - name: Provide GNU tools for the daily Mac fork
+        if: github.repository == 'cumminskd/hermes-agent' && runner.os == 'macOS'
+        run: |
+          brew install coreutils findutils grep
+          for package in coreutils findutils grep; do
+            printf '%s\n' "$(brew --prefix "$package")/libexec/gnubin" >> "$GITHUB_PATH"
+          done
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
           # Full commit graph + tags, blobs on demand: the diff below needs the

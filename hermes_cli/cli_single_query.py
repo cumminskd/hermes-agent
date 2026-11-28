@@ -175,6 +175,8 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False,
 
     if not isinstance(result, dict):
         if credentials_rate_limited and kanban_task_id():
+            from hermes_cli.kanban_quota_cooldown import emit_reset
+            emit_reset({})
             from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
             return KANBAN_RATE_LIMIT_EXIT_CODE
         if credentials_terminal and kanban_task_id():
@@ -188,6 +190,8 @@ def _single_query_exit_code(result, *, credentials_rate_limited: bool = False,
     if kanban_task_id():
         reason = result.get("failure_reason")
         if reason in _TRANSIENT_PROVIDER_REASONS:
+            from hermes_cli.kanban_quota_cooldown import emit_reset
+            emit_reset(result)
             from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
             return KANBAN_RATE_LIMIT_EXIT_CODE
         if reason in _TERMINAL_PROVIDER_REASONS:

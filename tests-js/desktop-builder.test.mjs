@@ -3,7 +3,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, beforeAll, describe, expect, test } from 'vitest'
 import { stageGetWindows, stageNodePtyInto } from '../apps/desktop/scripts/stage-native-deps.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -376,15 +376,23 @@ test('a prepared input changing during desktop compilation cannot publish a curr
   expect(files(input.out)).toEqual(previous)
 }, 30000)
 
-test('native preparation stages the selected source into an explicit tree before compilation', async () => {
-  const { prepareDesktopNativeDependencies } = await import('../apps/desktop/scripts/stage-native-deps.mjs')
-  const input = fixture()
-  cpSync(join(repo, 'package-lock.json'), join(input.source, 'package-lock.json'))
-  const nativeOut = join(dirname(input.out), 'prepared-native')
-  await prepareDesktopNativeDependencies({ source: input.source, out: nativeOut })
-  expect(existsSync(join(nativeOut, 'node-pty/package.json'))).toBe(true)
-  expect(files(join(nativeOut, 'node-pty')).some(([name]) => name.endsWith('.node'))).toBe(true)
-  expect(existsSync(join(input.source, 'apps/desktop/dist'))).toBe(false)
+describe('real prepared native fixture', () => {
+  let input, nativeOut
+  // Two real helper compiler jobs took 8.6s alone in a focused host probe;
+  // the default 10s hook budget also covers staging and receipt hashing.
+  // Bound this integration setup explicitly; assertions keep their normal budget.
+  beforeAll(async () => {
+    const { prepareDesktopNativeDependencies } = await import('../apps/desktop/scripts/stage-native-deps.mjs')
+    input = fixture()
+    cpSync(join(repo, 'package-lock.json'), join(input.source, 'package-lock.json'))
+    nativeOut = join(dirname(input.out), 'prepared-native')
+    await prepareDesktopNativeDependencies({ source: input.source, out: nativeOut })
+  }, 30000)
+  test('native preparation stages the selected source into an explicit tree before compilation', () => {
+    expect(existsSync(join(nativeOut, 'node-pty/package.json'))).toBe(true)
+    expect(files(join(nativeOut, 'node-pty')).some(([name]) => name.endsWith('.node'))).toBe(true)
+    expect(existsSync(join(input.source, 'apps/desktop/dist'))).toBe(false)
+  })
 })
 
 test('typecheck uses scratch state and incomplete prepared inputs fail before publication', async () => {

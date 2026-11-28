@@ -348,9 +348,9 @@ def _pid_alive(pid: Optional[int]) -> bool:
                 timeout=1,
                 check=False,
             )
-            if proc.returncode != 0:
-                return False
-            if "Z" in (proc.stdout or "").strip():
+            # A failed/empty secondary probe is uncertainty, not proof of death.
+            # Only a successful zombie observation overrides the existence probe.
+            if proc.returncode == 0 and (proc.stdout or "").strip().startswith("Z"):
                 return False
         except (OSError, subprocess.SubprocessError, TimeoutError):
             # If the secondary probe fails, keep the kill(0) answer.
@@ -379,50 +379,26 @@ def _process_fingerprint(pid: int) -> Optional[str]:
 
 
 def _worker_alive(pid: Optional[int], started_at) -> bool:
-    """True when ``pid`` is live AND is still the worker we spawned. ``started_at`` is the fingerprint
-    recorded by ``_set_worker_pid``; after a reboot (or any PID recycle) an unrelated process can own
-    the number, so bare existence is never enough to extend a claim or to signal. A legacy row without
-    a fingerprint keeps the existence answer: killing it is the pre-fingerprint behaviour and the row is
-    rewritten with a fingerprint on its next spawn. An UNVERIFIED spawn also keeps the existence answer
-    (a claim is never released beside a possibly-live worker) but ``_terminate_reclaimed_worker``
-    refuses to signal it."""
+    """Claim-protection predicate: possibly alive, not permission to signal.
+
+    Only definite death or a proven identity conflict releases a claim. Missing,
+    malformed or temporarily unreadable identity keeps the claim protected.
+    """
     if not _kb._pid_alive(pid):
         return False
-    if started_at == UNVERIFIED_WORKER_FINGERPRINT:
-        return True
     return not _pid_recycled(pid, started_at)
 
 
+def _worker_identity_matches(pid: Optional[int], started_at, *, exact: bool = False) -> Optional[bool]:
+    """Keep the dispatch monkeypatch seam while the identity policy lives in its sibling."""
+    from hermes_cli.kanban_worker_identity import worker_identity_matches
+
+    return worker_identity_matches(pid, started_at, exact=exact)
+
+
 def _pid_recycled(pid: Optional[int], started_at) -> bool:
-    """True when a live ``pid`` is NOT the process fingerprinted at spawn (or the fingerprint can no
-    longer be read). Signalling it would hit a stranger. ``None`` fingerprint = legacy row, never
-    recycled; the UNVERIFIED marker is always foreign. An integer fingerprint (rows written before the
-    boot witness was added) compares the start time only."""
-    if started_at is None or not pid:
-        return False
-    if started_at == UNVERIFIED_WORKER_FINGERPRINT:
-        return True
-    if isinstance(started_at, str) and "|" in started_at:
-        current = _process_fingerprint(int(pid))
-        if current is None:
-            return True
-        try:
-            recorded_epoch, recorded_start = started_at.rsplit("|", 1)
-            current_epoch, current_start = current.rsplit("|", 1)
-        except ValueError:
-            return True
-        if recorded_epoch != current_epoch:
-            return True
-        from gateway.status import start_time_fingerprints_match
-        return not start_time_fingerprints_match(recorded_start, current_start)
-    from gateway.status import _start_times_agree, get_process_start_time
-    current = get_process_start_time(int(pid))
-    if current is None:
-        return True
-    try:
-        return not _start_times_agree(current, started_at)
-    except (TypeError, ValueError):
-        return True
+    """True only for affirmative identity-conflict evidence; unreadable is unknown."""
+    return _worker_identity_matches(pid, started_at) is False
 
 
 def _kill_fn(signal_fn) -> Optional[Callable[[int, int], None]]:
@@ -479,15 +455,18 @@ def _terminate_reclaimed_worker(
 
     kill = _kill_fn(signal_fn)
     if kill is None:
-        return info
-    if started_at == UNVERIFIED_WORKER_FINGERPRINT:
-        # Never signal by bare number: a dead PID is "gone" (reclaim proceeds), a live one is held.
         info["signal_refused"] = True
-        info["terminated"] = not _kb._pid_alive(pid)
+        info["terminated"] = not _worker_alive(pid, started_at)
         return info
-    if _kb._pid_alive(pid) and _pid_recycled(pid, started_at):
+    if not _kb._pid_alive(pid):
+        info["terminated"] = True
+        return info
+    if _pid_recycled(pid, started_at):
         info["terminated"] = True
         info["pid_recycled"] = True
+        return info
+    if _worker_identity_matches(pid, started_at, exact=True) is not True:
+        info["signal_refused"] = True
         return info
 
     info["termination_attempted"] = True
@@ -505,6 +484,11 @@ def _terminate_reclaimed_worker(
         info["terminated"] = True
         return info
     if _worker_alive(pid, started_at):
+        # Revalidate after the grace period: identity may have become unreadable
+        # or the PID may have been reused since SIGTERM.
+        if _worker_identity_matches(pid, started_at, exact=True) is not True:
+            info["signal_refused"] = True
+            return info
         if not _sigkill(kill, pid):
             return info
         info["sigkill"] = True
@@ -692,24 +676,13 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         pid = int(row["worker_pid"])
         tid = row["id"]
         started_at = _kb._row_get(row, "worker_started_at")
-        if started_at == UNVERIFIED_WORKER_FINGERPRINT and _kb._pid_alive(pid):
-            # Fingerprint capture failed at spawn: we cannot prove this live PID is our worker, so
-            # it is neither signalled nor released beside (duplicate). It is reclaimed once it exits.
-            _kb._log.warning("kanban: task %s worker pid %s exceeded max runtime but has no verified "
-                             "identity; not signalled", tid, pid)
+        termination = _terminate_reclaimed_worker(
+            pid, lock, signal_fn=signal_fn, started_at=started_at)
+        if not termination["terminated"]:
+            _defer_reclaim_for_live_worker(
+                conn, tid, lock, now, termination, reason="max_runtime_worker_alive")
             continue
-        # SIGTERM then SIGKILL after 5 s grace; workers wanting a cleaner
-        # shutdown install their own SIGTERM handler. A recycled PID (fingerprint
-        # mismatch) is never signalled: the worker is already gone.
-        killed = False
-        kill = _kill_fn(signal_fn)
-        if kill is not None and not (_kb._pid_alive(pid) and _pid_recycled(pid, started_at)):
-            with contextlib.suppress(ProcessLookupError, OSError):
-                kill(pid, signal.SIGTERM)
-            # Short polling wait — no time.sleep on the write txn.
-            _poll_worker_exit(pid, started_at)
-            if _worker_alive(pid, started_at):
-                killed = _sigkill(kill, pid)
+        killed = termination["sigkill"]
 
         error = f"elapsed {int(elapsed)}s > limit {limit}s"
         with _kb.write_txn(conn):
@@ -1060,6 +1033,7 @@ class _DeadWorker:
 
 def _classify_dead_worker(
     pid: int, claimer: Optional[str], *, task_id: Optional[str] = None, board: Optional[str] = None,
+    run_id: Optional[int] = None,
 ) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping.
 
@@ -1067,7 +1041,7 @@ def _classify_dead_worker(
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
-    dead = _classify_dead_worker_exit(pid, claimer, task_id=task_id, board=board)
+    dead = _classify_dead_worker_exit(pid, claimer, task_id=task_id, board=board, run_id=run_id)
     if task_id and not dead.rate_limited:
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
@@ -1082,6 +1056,7 @@ def _classify_dead_worker_exit(
     *,
     task_id: Optional[str] = None,
     board: Optional[str] = None,
+    run_id: Optional[int] = None,
 ) -> _DeadWorker:
     """Exit status -> reclaim bookkeeping, before the worker's own words are folded in.
 
@@ -1109,13 +1084,18 @@ def _classify_dead_worker_exit(
             protocol_violation=True,
         )
     if kind == "rate_limited":
+        from hermes_cli.kanban_quota_cooldown import read_reset
+        try:
+            quota = read_reset(_kb.read_worker_log(task_id, tail_bytes=16000, board=board), pid, run_id) if task_id else read_reset("", pid, run_id)
+        except OSError:
+            quota = {"quota_exhausted": True, "quota_resets_at": None}
         # Quota wall — NOT a task failure. Release to the source phase and do
         # NOT count a failure so a long quota window can't trip the breaker.
         return _DeadWorker(
             kind, code,
             f"pid {pid} exited rate-limited (quota wall) — requeued without counting a failure",
             "rate_limited",
-            {"pid": pid, "claimer": claimer, "exit_code": code},
+            {"pid": pid, "claimer": claimer, "exit_code": code, **quota},
             rate_limited=True,
         )
     if kind == "terminal_provider":
@@ -1162,7 +1142,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
     sweep = _CrashSweep()
     with _kb.write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee "
+            "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee, current_run_id "
             "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
@@ -1180,7 +1160,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 continue
 
             pid = int(row["worker_pid"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board)
+            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board,
+                                         run_id=row["current_run_id"])
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -1600,6 +1581,14 @@ def check_respawn_guard(
             if ended_at is not None and (now - int(ended_at)) < rl_cooldown:
                 return "infrastructure_cooldown"
     if latest_run is not None and latest_run["outcome"] == "rate_limited":
+        from hermes_cli.kanban_quota_cooldown import reset_epoch
+        metadata = _kb._json_dict(latest_run["metadata"])
+        if metadata.get("quota_exhausted") is True:
+            reset = reset_epoch(metadata.get("quota_resets_at"))
+            if reset is None:
+                # No trustworthy reset time: require explicit reconciliation.
+                return "quota_reset_unknown"
+            return "rate_limit_cooldown" if now < reset else None
         if rl_cooldown <= 0:
             # Cooldown disabled — respawn immediately, skipping blocker_auth so
             # the stamped rate-limit text doesn't re-trap the task.
