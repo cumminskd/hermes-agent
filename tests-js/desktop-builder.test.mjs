@@ -378,15 +378,16 @@ test('a prepared input changing during desktop compilation cannot publish a curr
 
 describe('real prepared native fixture', () => {
   let input, nativeOut
-  // Preparation includes host compiler jobs, not just staging a module. Use
-  // Vitest's bounded setup lifecycle; assertions retain the normal test budget.
+  // Two real helper compiler jobs took 8.6s alone in a focused host probe;
+  // the default 10s hook budget also covers staging and receipt hashing.
+  // Bound this integration setup explicitly; assertions keep their normal budget.
   beforeAll(async () => {
     const { prepareDesktopNativeDependencies } = await import('../apps/desktop/scripts/stage-native-deps.mjs')
     input = fixture()
     cpSync(join(repo, 'package-lock.json'), join(input.source, 'package-lock.json'))
     nativeOut = join(dirname(input.out), 'prepared-native')
     await prepareDesktopNativeDependencies({ source: input.source, out: nativeOut })
-  })
+  }, 30000)
   test('native preparation stages the selected source into an explicit tree before compilation', () => {
     expect(existsSync(join(nativeOut, 'node-pty/package.json'))).toBe(true)
     expect(files(join(nativeOut, 'node-pty')).some(([name]) => name.endsWith('.node'))).toBe(true)
