@@ -288,6 +288,8 @@ jobs:
   icons-freshness-check:
     name: Icon assets freshness
     needs: detect
+    # Daily fork CI omits asset regeneration; manual/release and upstream keep it.
+    if: needs.detect.outputs.mac_only != 'true'
     uses: ./.github/workflows/icons-freshness-check.yml
 
   case-collision-check:
